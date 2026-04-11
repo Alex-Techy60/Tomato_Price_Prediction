@@ -18,117 +18,170 @@ df = df.dropna()
 
 states = df['State'].unique()
 
-print("\n🚀 Comparing ALL 4 Models...\n")
+print("\n🚀 Comparing ALL Models (Statistical + ML + Baselines)...\n")
 
-# 🔥 Feature engineering (for ML models)
+# Feature engineering for ML models
 def create_features(data):
-    df = data.copy()
-    df['lag_1'] = df['Price'].shift(1)
-    df['lag_2'] = df['Price'].shift(2)
-    df['lag_3'] = df['Price'].shift(3)
-    df['month'] = df.index.month
-    df['year'] = df.index.year
-    return df.dropna()
+    temp = data.copy()
+    temp['lag_1'] = temp['Price'].shift(1)
+    temp['lag_2'] = temp['Price'].shift(2)
+    temp['lag_3'] = temp['Price'].shift(3)
+    temp['month'] = temp.index.month
+    temp['year'] = temp.index.year
+    return temp.dropna()
 
 for state in states:
     print(f"📍 State: {state}")
 
-    state_df = df[df['State'] == state].copy()
-    state_df = state_df.set_index('Date')
-    state_df = state_df[['Price']]
-    state_df = state_df.resample('ME').mean().dropna()
+    try:
+        state_df = df[df['State'] == state].copy()
+        state_df = state_df.set_index('Date')
+        state_df = state_df[['Price']]
+        state_df = state_df.resample('ME').mean().dropna()
 
-    split_date = '2025-01-01'
+        split_date = '2025-01-01'
 
-    # =========================
-    # 🔵 SARIMA
-    # =========================
-    train_sarima = state_df[state_df.index < split_date]
-    test_sarima = state_df[state_df.index >= split_date]
+        # =========================
+        # Train-Test Split
+        # =========================
+        train = state_df[state_df.index < split_date]
+        test = state_df[state_df.index >= split_date]
 
-    sarima_model = SARIMAX(
-        train_sarima['Price'],
-        order=(1,1,1),
-        seasonal_order=(1,1,1,12),
-        enforce_stationarity=False,
-        enforce_invertibility=False
-    )
+        if len(test) == 0 or len(train) < 12:
+            print("⚠️ Not enough data, skipping...\n")
+            continue
 
-    sarima_fit = sarima_model.fit(disp=False)
-    sarima_pred = sarima_fit.forecast(steps=len(test_sarima))
-    sarima_mae = mean_absolute_error(test_sarima['Price'], sarima_pred)
+        # =========================
+        # 🔵 SARIMA
+        # =========================
+        sarima_model = SARIMAX(
+            train['Price'],
+            order=(1, 1, 1),
+            seasonal_order=(1, 1, 1, 12),
+            enforce_stationarity=False,
+            enforce_invertibility=False
+        )
 
-    # =========================
-    # 🔴 PROPHET
-    # =========================
-    train_prophet = train_sarima.reset_index()
-    train_prophet.columns = ['ds', 'y']
+        sarima_fit = sarima_model.fit(disp=False)
+        sarima_pred = sarima_fit.forecast(steps=len(test))
+        sarima_mae = mean_absolute_error(test['Price'], sarima_pred)
 
-    prophet_model = Prophet()
-    prophet_model.fit(train_prophet)
+        # =========================
+        # 🔴 PROPHET
+        # =========================
+        train_prophet = train.reset_index()
+        train_prophet.columns = ['ds', 'y']
 
-    future = prophet_model.make_future_dataframe(periods=len(test_sarima), freq='M')
-    forecast = prophet_model.predict(future)
+        prophet_model = Prophet()
+        prophet_model.fit(train_prophet)
 
-    prophet_pred = forecast.set_index('ds')['yhat'][-len(test_sarima):]
-    prophet_mae = mean_absolute_error(test_sarima['Price'], prophet_pred)
+        future = prophet_model.make_future_dataframe(periods=len(test), freq='M')
+        forecast = prophet_model.predict(future)
 
-    # =========================
-    # 🟢 XGBOOST
-    # =========================
-    xgb_df = create_features(state_df)
-    train_xgb = xgb_df[xgb_df.index < split_date]
-    test_xgb = xgb_df[xgb_df.index >= split_date]
+        prophet_pred = forecast.set_index('ds')['yhat'][-len(test):]
+        prophet_mae = mean_absolute_error(test['Price'], prophet_pred)
 
-    X_train_xgb = train_xgb.drop(columns=['Price'])
-    y_train_xgb = train_xgb['Price']
-    X_test_xgb = test_xgb.drop(columns=['Price'])
-    y_test_xgb = test_xgb['Price']
+        # =========================
+        # 🟢 XGBOOST + 🟡 RANDOM FOREST
+        # =========================
+        ml_df = create_features(state_df)
+        train_ml = ml_df[ml_df.index < split_date]
+        test_ml = ml_df[ml_df.index >= split_date]
 
-    xgb_model = XGBRegressor(n_estimators=200, learning_rate=0.05, max_depth=5)
-    xgb_model.fit(X_train_xgb, y_train_xgb)
+        X_train = train_ml.drop(columns=['Price'])
+        y_train = train_ml['Price']
+        X_test = test_ml.drop(columns=['Price'])
+        y_test = test_ml['Price']
 
-    xgb_pred = xgb_model.predict(X_test_xgb)
-    xgb_mae = mean_absolute_error(y_test_xgb, xgb_pred)
+        xgb_model = XGBRegressor(
+            n_estimators=200,
+            learning_rate=0.05,
+            max_depth=5,
+            random_state=42
+        )
+        xgb_model.fit(X_train, y_train)
+        xgb_pred = xgb_model.predict(X_test)
+        xgb_mae = mean_absolute_error(y_test, xgb_pred)
 
-    # =========================
-    # 🟡 RANDOM FOREST
-    # =========================
-    rf_model = RandomForestRegressor(n_estimators=200, max_depth=10, random_state=42)
-    rf_model.fit(X_train_xgb, y_train_xgb)
+        rf_model = RandomForestRegressor(
+            n_estimators=200,
+            max_depth=10,
+            random_state=42
+        )
+        rf_model.fit(X_train, y_train)
+        rf_pred = rf_model.predict(X_test)
+        rf_mae = mean_absolute_error(y_test, rf_pred)
 
-    rf_pred = rf_model.predict(X_test_xgb)
-    rf_mae = mean_absolute_error(y_test_xgb, rf_pred)
+        # =========================
+        # ⚪ BASELINE MODELS
+        # =========================
+        # Mean
+        mean_value = train['Price'].mean()
+        mean_pred = pd.Series([mean_value] * len(test), index=test.index)
+        mean_mae = mean_absolute_error(test['Price'], mean_pred)
 
-    # =========================
-    # 📈 COMBINED GRAPH
-    # =========================
-    plt.figure(figsize=(10,5))
+        # Naive
+        naive_value = train['Price'].iloc[-1]
+        naive_pred = pd.Series([naive_value] * len(test), index=test.index)
+        naive_mae = mean_absolute_error(test['Price'], naive_pred)
 
-    # Actual
-    plt.plot(state_df.index, state_df['Price'], label='Actual', linewidth=2)
+        # Seasonal Naive
+        seasonal_period = 12
+        seasonal_values = train['Price'].iloc[-seasonal_period:].values
+        seasonal_pred = pd.Series(
+            [seasonal_values[i % seasonal_period] for i in range(len(test))],
+            index=test.index
+        )
+        seasonal_mae = mean_absolute_error(test['Price'], seasonal_pred)
 
-    # Predictions
-    plt.plot(test_sarima.index, sarima_pred, label=f'SARIMA ({sarima_mae:.1f})')
-    plt.plot(test_sarima.index, prophet_pred, label=f'Prophet ({prophet_mae:.1f})')
-    plt.plot(test_xgb.index, xgb_pred, label=f'XGBoost ({xgb_mae:.1f})')
-    plt.plot(test_xgb.index, rf_pred, label=f'RandomForest ({rf_mae:.1f})')
+        # Drift
+        first_value = train['Price'].iloc[0]
+        last_value = train['Price'].iloc[-1]
+        n = len(train)
 
-    plt.axvline(pd.to_datetime(split_date), linestyle='--', label='Train/Test Split')
+        drift_pred = pd.Series(
+            [last_value + h * ((last_value - first_value) / (n - 1)) for h in range(1, len(test) + 1)],
+            index=test.index
+        )
+        drift_mae = mean_absolute_error(test['Price'], drift_pred)
 
-    plt.title(f"{state} Model Comparison (All 4)")
-    plt.xlabel("Date")
-    plt.ylabel("Price")
-    plt.legend()
-    plt.tight_layout()
+        # =========================
+        # 📈 COMBINED GRAPH
+        # =========================
+        plt.figure(figsize=(14, 7))
 
-    plt.savefig(f"comparison_model/{state}_all_models.png")
-    plt.close()
+        plt.plot(state_df.index, state_df['Price'], label='Actual', linewidth=2)
+        plt.plot(test.index, sarima_pred, label=f'SARIMA ({sarima_mae:.1f})')
+        plt.plot(test.index, prophet_pred, label=f'Prophet ({prophet_mae:.1f})')
+        plt.plot(test_ml.index, xgb_pred, label=f'XGBoost ({xgb_mae:.1f})')
+        plt.plot(test_ml.index, rf_pred, label=f'RandomForest ({rf_mae:.1f})')
+        plt.plot(test.index, mean_pred, '--', label=f'Mean ({mean_mae:.1f})')
+        plt.plot(test.index, naive_pred, '--', label=f'Naive ({naive_mae:.1f})')
+        plt.plot(test.index, seasonal_pred, '--', label=f'Seasonal Naive ({seasonal_mae:.1f})')
+        plt.plot(test.index, drift_pred, '--', label=f'Drift ({drift_mae:.1f})')
 
-    print(f"📊 Saved: {state}_all_models.png")
-    print(f"   SARIMA: {sarima_mae:.2f}")
-    print(f"   Prophet: {prophet_mae:.2f}")
-    print(f"   XGBoost: {xgb_mae:.2f}")
-    print(f"   RandomForest: {rf_mae:.2f}\n")
+        plt.axvline(pd.to_datetime(split_date), linestyle='--', color='black', label='Train/Test Split')
+
+        plt.title(f"{state} Model Comparison (All Models)")
+        plt.xlabel("Date")
+        plt.ylabel("Price")
+        plt.legend(fontsize=8)
+        plt.tight_layout()
+
+        plt.savefig(f"comparison_model/{state}_all_models_with_baselines.png")
+        plt.close()
+
+        print(f"📊 Saved: {state}_all_models_with_baselines.png")
+        print(f"   SARIMA: {sarima_mae:.2f}")
+        print(f"   Prophet: {prophet_mae:.2f}")
+        print(f"   XGBoost: {xgb_mae:.2f}")
+        print(f"   RandomForest: {rf_mae:.2f}")
+        print(f"   Mean: {mean_mae:.2f}")
+        print(f"   Naive: {naive_mae:.2f}")
+        print(f"   Seasonal Naive: {seasonal_mae:.2f}")
+        print(f"   Drift: {drift_mae:.2f}\n")
+
+    except Exception as e:
+        print(f"❌ Error in {state}: {e}\n")
 
 print("🎯 All Models Comparison Complete!")
